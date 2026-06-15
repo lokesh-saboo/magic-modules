@@ -1,0 +1,102 @@
+# Copyright 2026 Google Inc.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+name: PreparedNode
+description: Description
+base_url: projects/{{project}}/locations/{{location}}/preparedNodes
+immutable: true
+self_link: projects/{{project}}/locations/{{location}}/preparedNodes/{{prepared_node_id}}
+create_url: projects/{{project}}/locations/{{location}}/preparedNodes?preparedNodeId={{prepared_node_id}}
+import_format:
+  - projects/{{project}}/locations/{{location}}/preparedNodes/{{prepared_node_id}}
+async:
+  operation:
+    base_url: '{{op_id}}'
+  actions:
+    - create
+  result:
+    resource_inside_response: true
+autogen_status: UHJlcGFyZWROb2Rl
+autogen_async: true
+datasource_experimental:
+  generate: true
+  exclude_test: true
+examples:
+  - name: self_managed_vmware_engine_prepared_node_create
+    primary_resource_id: example_prepared_node
+    test_env_vars:
+      region: "REGION"
+      zone: "ZONE"
+      project: "PROJECT"
+    min_version: beta
+    exclude_test: true
+exclude_delete: true
+parameters:
+  - name: location
+    type: String
+    required: true
+    description: Resource ID segment making up resource `name`. It identifies the resource within its parent collection as described in https://google.aip.dev/122.
+    immutable: true
+    url_param_only: true
+  - name: preparedNodeId
+    type: String
+    required: true
+    description: |-
+      The user input ID of the Node - this should match exactly with
+      the compute instance ID of the node to be prepared (server defined unique
+      identifier -
+      https://docs.cloud.google.com/compute/docs/reference/rest/v1/instances/get).
+    immutable: true
+    url_param_only: true
+properties:
+  - name: createTime
+    type: String
+    description: When the preparation request was created.
+    output: true
+  - name: esxiRootPassword
+    type: String
+    description: |-
+      Input only. The password to be set for the ESXi root user.
+      This field is input only and will not be returned by Get/List.
+  - name: name
+    type: String
+    description: Identifier. The resource name.
+    output: true
+  - name: vcfInstallerMetadata
+    type: NestedObject
+    description: Metadata for the optional VCF Installer deployment.
+    properties:
+      - name: applianceFqdn
+        type: String
+        required: true
+        description: Appliance FQDN.
+      - name: applianceRootPassword
+        type: String
+        required: true
+        description: Input only. Appliance root password.
+      - name: forwardingRule
+        type: String
+        description: |-
+          The full resource name of a Compute Engine ForwardingRule.
+          Format:
+          projects/{project}/regions/{region}/forwardingRules/{forwarding_rule}
+      - name: localUserPassword
+        type: String
+        required: true
+        description: Input only. Local user password.
+      - name: reservedAddress
+        type: String
+        description: |-
+          The full resource name of a Compute Engine Address resource.
+          Format: projects/{project}/regions/{region}/addresses/{address}

@@ -1,0 +1,13 @@
+# Use existing compute instance
+data "google_compute_instance" "test_instance" {
+  name     = "gce_instance"
+  location = "{{index $.TestEnvVars "zone"}}"
+}
+
+# Create a prepared node, using existing gce instance.
+resource "google_self_managed_vmware_engine_prepared_node" "{{$.PrimaryResourceId}}" {
+  location         = "{{index $.TestEnvVars "zone"}}"
+  prepared_node_id = data.google_compute_instance.test_instance.instance_id
+  provider = google-beta
+}
+
