@@ -13,7 +13,10 @@
 
 ---
 name: PreparedNode
-description: Description
+description: |-
+  A PreparedNode resource orchestrates the preparation of a Compute Engine bare metal instance for Self-Managed VMware Engine.
+
+  For a comprehensive end-to-end deployment walkthrough, see the [Prepared Node E2E Guide](../guides/self_managed_vmware_engine_prepared_node_create_e2e.html.markdown).
 base_url: projects/{{project}}/locations/{{location}}/preparedNodes
 immutable: true
 self_link: projects/{{project}}/locations/{{location}}/preparedNodes/{{prepared_node_id}}
@@ -39,6 +42,10 @@ examples:
       region: "REGION"
       zone: "ZONE"
       project: "PROJECT"
+    min_version: beta
+    exclude_test: true
+  - name: self_managed_vmware_engine_prepared_node_create_e2e
+    primary_resource_id: example_prepared_node
     min_version: beta
     exclude_test: true
 exclude_delete: true
