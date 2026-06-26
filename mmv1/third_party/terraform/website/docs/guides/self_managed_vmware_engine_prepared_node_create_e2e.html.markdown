@@ -1,7 +1,7 @@
 ---
 page_title: "End-to-End Self-Managed VMware Engine Node Preparation"
 description: |-
-  A comprehensive walkthrough for deploying Bare Metal Compute Engine instances and configuring Self-Managed VMware Engine prepared nodes with VCF Installer access through Terraform.
+  A comprehensive walkthrough for deploying Bare Metal Compute Engine instances, firewall rules, private DNS zones, multiple subnets, and configuring Self-Managed VMware Engine prepared nodes with Google Secret Manager integration via Terraform.
 ---
 
 # End-to-End Self-Managed VMware Engine Node Preparation
@@ -10,16 +10,19 @@ This walkthrough demonstrates how to orchestrate an end-to-end deployment of Sel
 
 ## Architecture Overview
 
-Deploying VMware Cloud Foundation (VCF) on Self-Managed VMware Engine requires orchestrating resources across three distinct layers:
-1. **Compute Engine Layer**: Provisioning the underlying Bare Metal instances, subnetworks, and placement resource policies.
-2. **Networking Setup (VCF Load Balancer)**: Configuring an internal managed load balancer (Network Endpoint Group, Backend Service, and Forwarding Rule) to establish secure management connectivity for the VCF Installer.
-3. **Self-Managed VMware Engine API**: Invoking the `:prepareNode` custom API resource (`google_self_managed_vmware_engine_prepared_node`) to configure ESXi host passwords, deploy VCF Installer components, and initiate configuration drift monitoring.
+Deploying VMware Cloud Foundation (VCF) on Self-Managed VMware Engine requires orchestrating resources across multiple distinct layers:
+1. **Firewall Rules Layer**: Provisioning ingress firewall rules to manage network traffic within the VPC network.
+2. **DNS Configuration Layer**: Setting up internal DNS policies, private forward/reverse DNS zones, and DNS records for local name resolution.
+3. **Compute Engine Layer**: Provisioning the underlying Bare Metal instances, eight specialized subnetworks, and placement resource policies.
+4. **Networking Setup (VCF Load Balancer)**: Configuring an internal managed load balancer (Network Endpoint Group, Backend Service, and Forwarding Rule) to establish secure management connectivity for the VCF Installer.
+5. **Secret Management Layer**: Fetching host and appliance credentials securely from Google Secret Manager.
+6. **Self-Managed VMware Engine API**: Invoking the `:prepareNode` custom API resource (`google_self_managed_vmware_engine_prepared_node`) to configure ESXi host passwords, deploy VCF Installer components, and initiate configuration drift monitoring.
 
 ---
 
 ## Step 1: Define User Inputs & Variables
 
-Configure standard GCP project variables along with bare metal configuration and sensitive appliance credentials.
+Configure standard GCP project variables, network infrastructure options, and Secret Manager references for sensitive appliance credentials.
 
 ```hcl
 variable "project_id" {
@@ -65,21 +68,32 @@ variable "vpc_network_name" {
   type        = string
 }
 
-variable "esxi_root_password" {
-  description = "Root password for each ESXi host."
+variable "esxi_root_password_secret_id" {
+  description = "The Secret Manager secret ID containing the root password for each ESXi host."
   type        = string
-  sensitive   = true
+}
+
+variable "vcf_appliance_root_password_secret_id" {
+  description = "The Secret Manager secret ID containing the root password for the VCF appliance."
+  type        = string
+}
+
+variable "vcf_local_user_password_secret_id" {
+  description = "The Secret Manager secret ID containing the local user password for the VCF appliance."
+  type        = string
+}
+
+variable "license_key_secret_id" {
+  description = "The Secret Manager secret ID containing the license key."
+  type        = string
 }
 
 variable "vcf_installer_metadata" {
-  description = "An object containing details crucial for VCF deployment."
+  description = "An object containing metadata crucial for VCF deployment."
   type = object({
-    appliance_fqdn          = string
-    vcf_version             = string
-    appliance_root_password = string
-    local_user_password     = string
+    appliance_fqdn = string
+    vcf_version    = string
   })
-  sensitive = true
 }
 
 variable "subnet_name" {
@@ -115,9 +129,107 @@ variable "static_ip_name" {
 
 ---
 
-## Step 2: Compute Engine Infrastructure Setup
+## Step 2: Firewall Rule Creation
 
-This phase sets up the underlying Bare Metal instances and attaches network interface cards (NICs) to either an existing or newly provisioned subnet. It also ensures instances adhere to placement policies.
+Configure ingress firewall rules on the VPC to allow all necessary internal protocols.
+
+```hcl
+resource "google_compute_firewall" "allow_all" {
+  name    = "gcve-vpc-network-allow-all"
+  network = var.vpc_network_name
+
+  allow {
+    protocol = "all"
+  }
+
+  source_ranges = ["0.0.0.0/0"]
+}
+```
+
+---
+
+## Step 3: DNS Configuration
+
+Create a DNS policy with inbound forwarding enabled, and establish private DNS zones (forward and reverse lookup zones) along with records for NTP, the VCF appliance, and ESXi nodes.
+
+```hcl
+resource "google_dns_policy" "dns_policy" {
+  name                      = "vcf-dns-policy"
+  enable_inbound_forwarding = true
+
+  networks {
+    network_url = var.vpc_network_name
+  }
+}
+
+resource "google_dns_managed_zone" "forward_zone" {
+  name        = "vcf-forward-zone"
+  dns_name    = "gcve-vcf.test.gve."
+  description = "Forward lookup zone for VCF"
+
+  visibility = "private"
+
+  private_visibility_config {
+    networks {
+      network_url = var.vpc_network_name
+    }
+  }
+}
+
+resource "google_dns_managed_zone" "reverse_zone" {
+  name        = "vcf-reverse-zone"
+  dns_name    = "0.10.in-addr.arpa."
+  description = "Reverse lookup zone for VCF"
+
+  visibility = "private"
+
+  private_visibility_config {
+    networks {
+      network_url = var.vpc_network_name
+    }
+  }
+}
+
+resource "google_dns_record_set" "ntp" {
+  name         = "ntp.gcve-vcf.test.gve."
+  managed_zone = google_dns_managed_zone.forward_zone.name
+  type         = "A"
+  ttl          = 300
+  rrdatas      = ["10.0.7.10"]
+}
+
+resource "google_dns_record_set" "appliance" {
+  name         = "${var.vcf_installer_metadata.appliance_fqdn}."
+  managed_zone = google_dns_managed_zone.forward_zone.name
+  type         = "A"
+  ttl          = 300
+  rrdatas      = [local.lb_ip_address]
+}
+
+resource "google_dns_record_set" "esxi_nodes" {
+  count        = var.node_count
+  name         = "esxi-node-${count.index}.gcve-vcf.test.gve."
+  managed_zone = google_dns_managed_zone.forward_zone.name
+  type         = "A"
+  ttl          = 300
+  rrdatas      = [google_compute_instance.bare_metal_node[count.index].network_interface[0].network_ip]
+}
+
+resource "google_dns_record_set" "reverse_esxi_nodes" {
+  count        = var.node_count
+  name         = "${split(".", google_compute_instance.bare_metal_node[count.index].network_interface[0].network_ip)[3]}.${split(".", google_compute_instance.bare_metal_node[count.index].network_interface[0].network_ip)[2]}.0.10.in-addr.arpa."
+  managed_zone = google_dns_managed_zone.reverse_zone.name
+  type         = "PTR"
+  ttl          = 300
+  rrdatas      = ["esxi-node-${count.index}.gcve-vcf.test.gve."]
+}
+```
+
+---
+
+## Step 4: Compute Engine Layer
+
+This phase sets up the underlying Bare Metal instances and attaches network interfaces. When creating a new network setup, we provision eight specialized subnets: ESXi, NSX TEP, VM Mgmt, vMotion, vSAN, Uplink, DNS, and Offline Depot.
 
 ```hcl
 # Lookup existing subnet if subnet_name is provided
@@ -127,13 +239,73 @@ data "google_compute_subnetwork" "existing_subnet" {
   region = var.region
 }
 
-# Create a new subnet if subnet_name is not provided
-resource "google_compute_subnetwork" "new_subnet" {
+# Create new subnets if subnet_name is not provided
+resource "google_compute_subnetwork" "subnet_esxi" {
   count         = var.subnet_name == "" ? 1 : 0
-  name          = "vcf-prepared-node-subnet"
+  name          = "vcf-subnet-esxi"
   ip_cidr_range = "10.0.1.0/24"
   region        = var.region
   network       = var.vpc_network_name
+}
+
+resource "google_compute_subnetwork" "subnet_nsx_tep" {
+  count         = var.subnet_name == "" ? 1 : 0
+  name          = "vcf-subnet-nsx-tep"
+  ip_cidr_range = "10.0.2.0/24"
+  region        = var.region
+  network       = var.vpc_network_name
+}
+
+resource "google_compute_subnetwork" "subnet_vm_mgmt" {
+  count         = var.subnet_name == "" ? 1 : 0
+  name          = "vcf-subnet-vm-mgmt"
+  ip_cidr_range = "10.0.3.0/24"
+  region        = var.region
+  network       = var.vpc_network_name
+}
+
+resource "google_compute_subnetwork" "subnet_vmotion" {
+  count         = var.subnet_name == "" ? 1 : 0
+  name          = "vcf-subnet-vmotion"
+  ip_cidr_range = "10.0.4.0/24"
+  region        = var.region
+  network       = var.vpc_network_name
+}
+
+resource "google_compute_subnetwork" "subnet_vsan" {
+  count         = var.subnet_name == "" ? 1 : 0
+  name          = "vcf-subnet-vsan"
+  ip_cidr_range = "10.0.5.0/24"
+  region        = var.region
+  network       = var.vpc_network_name
+}
+
+resource "google_compute_subnetwork" "subnet_uplink" {
+  count         = var.subnet_name == "" ? 1 : 0
+  name          = "vcf-subnet-uplink"
+  ip_cidr_range = "10.0.6.0/24"
+  region        = var.region
+  network       = var.vpc_network_name
+}
+
+resource "google_compute_subnetwork" "subnet_dns" {
+  count         = var.subnet_name == "" ? 1 : 0
+  name          = "vcf-subnet-dns"
+  ip_cidr_range = "10.0.7.0/24"
+  region        = var.region
+  network       = var.vpc_network_name
+}
+
+resource "google_compute_subnetwork" "subnet_offline_depot" {
+  count         = var.subnet_name == "" ? 1 : 0
+  name          = "vcf-subnet-offline-depot"
+  ip_cidr_range = "10.0.8.0/24"
+  region        = var.region
+  network       = var.vpc_network_name
+}
+
+locals {
+  subnet_id = var.subnet_name != "" ? data.google_compute_subnetwork.existing_subnet[0].id : google_compute_subnetwork.subnet_esxi[0].id
 }
 
 # Lookup existing resource policy if provided
@@ -155,7 +327,6 @@ resource "google_compute_resource_policy" "new_policy" {
 }
 
 locals {
-  subnet_id          = var.subnet_name != "" ? data.google_compute_subnetwork.existing_subnet[0].id : google_compute_subnetwork.new_subnet[0].id
   resource_policy_id = var.resource_policy_name != "" ? data.google_compute_resource_policy.existing_policy[0].id : google_compute_resource_policy.new_policy[0].id
 }
 
@@ -208,9 +379,9 @@ resource "google_compute_instance" "bare_metal_node" {
 
 ---
 
-## Step 3: Networking Setup (VCF Load Balancer)
+## Step 5: Networking Setup (VCF Load Balancer)
 
-Configure an internal managed load balancer targeting port `443`. This establishes the single management entry point required for deploying the VCF Installer.
+Configure an internal managed load balancer targeting port `443` on the ESXi instances. This establishes the management entry point required for deploying the VCF Installer.
 
 ```hcl
 data "google_compute_network_endpoint_group" "existing_neg" {
@@ -303,22 +474,46 @@ resource "google_compute_forwarding_rule" "vcf_forwarding_rule" {
 
 ---
 
-## Step 4: Invoke Self-Managed VMware Engine API
+## Step 6: Secret Management (Google Secret Manager)
 
-The `:prepareNode` API depends on both the instances and load balancer setup being complete. Calling this API orchestrates setting the ESXi root password, deploying VCF Installer components via the load balancer IP, and triggering the Drift Manager.
+To adhere to security best practices, retrieve all host and VCF installer appliance passwords from Google Secret Manager.
+
+```hcl
+data "google_secret_manager_secret_version" "esxi_root_pw" {
+  secret = var.esxi_root_password_secret_id
+}
+
+data "google_secret_manager_secret_version" "vcf_appliance_root_pw" {
+  secret = var.vcf_appliance_root_password_secret_id
+}
+
+data "google_secret_manager_secret_version" "vcf_local_user_pw" {
+  secret = var.vcf_local_user_password_secret_id
+}
+
+data "google_secret_manager_secret_version" "license_key" {
+  secret = var.license_key_secret_id
+}
+```
+
+---
+
+## Step 7: Invoke Self-Managed VMware Engine API
+
+The `:prepareNode` API depends on both the instances and load balancer setup being complete. Calling this API orchestrates setting the ESXi root password, deploying VCF Installer components via the load balancer IP, and triggering the Drift Manager using the fetched secrets.
 
 ```hcl
 resource "google_self_managed_vmware_engine_prepared_node" "prepared_node" {
   count              = var.node_count
   location           = var.zone
   prepared_node_id   = google_compute_instance.bare_metal_node[count.index].instance_id
-  esxi_root_password = var.esxi_root_password
+  esxi_root_password = data.google_secret_manager_secret_version.esxi_root_pw.secret_data
   provider           = google-beta
 
   vcf_installer_metadata {
     appliance_fqdn          = var.vcf_installer_metadata.appliance_fqdn
-    appliance_root_password = var.vcf_installer_metadata.appliance_root_password
-    local_user_password     = var.vcf_installer_metadata.local_user_password
+    appliance_root_password = data.google_secret_manager_secret_version.vcf_appliance_root_pw.secret_data
+    local_user_password     = data.google_secret_manager_secret_version.vcf_local_user_pw.secret_data
     forwarding_rule         = google_compute_forwarding_rule.vcf_forwarding_rule.id
     reserved_address        = local.lb_ip_id
   }
@@ -332,7 +527,7 @@ resource "google_self_managed_vmware_engine_prepared_node" "prepared_node" {
 
 ---
 
-## Step 5: Outputs & Verification
+## Step 8: Outputs & Verification
 
 Expose instance IDs, prepared node IDs, and the VCF Load Balancer IP address.
 
@@ -355,5 +550,6 @@ output "vcf_load_balancer_ip" {
 
 ### Verification Checklist
 - Run `terraform init` and `terraform plan`.
-- Verify that `terraform plan` successfully resolves conditional subnet, resource policy, and NEG lookups.
+- Verify that `terraform plan` successfully resolves conditional subnet, resource policy, and NEG lookups, and accesses Secret Manager.
+- Verify private DNS configuration resolves your FQDN and hosts locally.
 - After running `terraform apply`, confirm via the Google Cloud Console that the Bare Metal instances are registered in the regional Backend Service health checks.
